@@ -1,0 +1,42 @@
+# ============================================================
+# THE PDF HUNTER - Docker Compose for Coolify
+# Subdominio: py.geofal.com.pe
+# ============================================================
+
+services:
+  pdf-hunter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf-hunter
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persistir descargas entre reinicios
+      - pdf_downloads:/app/downloads
+      - pdf_temp:/app/temp_pdfs
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Para Coolify - la app escuchará en todas las interfaces
+      - HOST=0.0.0.0
+      - PORT=8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    # Labels para Coolify/Traefik (si usa proxy reverso)
+    labels:
+      - "coolify.managed=true"
+      - "traefik.enable=true"
+      - "traefik.http.routers.pdf-hunter.rule=Host(`py.geofal.com.pe`)"
+      - "traefik.http.routers.pdf-hunter.entrypoints=websecure"
+      - "traefik.http.routers.pdf-hunter.tls.certresolver=letsencrypt"
+      - "traefik.http.services.pdf-hunter.loadbalancer.server.port=8080"
+
+volumes:
+  pdf_downloads:
+  pdf_temp:
+
