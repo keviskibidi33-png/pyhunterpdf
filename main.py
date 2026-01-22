@@ -98,14 +98,20 @@ def extract_emission_date(pdf_path: Path) -> str:
         return f"ERROR: {str(e)[:50]}"
 
 def parse_links_file(content: str, filename: str) -> list[str]:
-    """Parsea archivo .txt o .csv para extraer links"""
+    """Parsea archivo .txt o .csv para extraer links y normaliza caracteres extraños"""
     links = []
+    
+    # Normalización de encoding mojibake (Común: Â° -> °)
+    content = content.replace('\u00c2\u00b0', '\u00b0').replace('\u00c2', '')
     
     if filename.lower().endswith('.csv'):
         # Intentar detectar la columna de links
         import io
         reader = csv.reader(io.StringIO(content))
-        headers = next(reader, None)
+        try:
+            headers = next(reader, None)
+        except Exception:
+            headers = None
         
         # Buscar columna que contenga 'link', 'url', 'enlace'
         link_col = 0
@@ -119,12 +125,16 @@ def parse_links_file(content: str, filename: str) -> list[str]:
             if row and len(row) > link_col:
                 url = row[link_col].strip()
                 if url.startswith('http'):
+                    # Limpiar espacios y caracteres invisibles
+                    url = re.sub(r'[\s\u200b\u200c\u200d\ufeff]', '', url)
                     links.append(url)
     else:
         # Archivo TXT: una URL por línea
         for line in content.split('\n'):
             url = line.strip()
             if url.startswith('http'):
+                # Limpiar espacios y caracteres invisibles
+                url = re.sub(r'[\s\u200b\u200c\u200d\ufeff]', '', url)
                 links.append(url)
     
     return links
@@ -303,7 +313,31 @@ async def main_page():
         nonlocal links_to_download
         
         try:
-            content = e.content.read().decode('utf-8', errors='ignore')
+            # NiceGUI 2.0+ Upload API
+            content_bytes = None
+            
+            # Intentar obtener contenido de forma defensiva
+            if hasattr(e, 'content') and e.content:
+                if hasattr(e.content, 'read'):
+                    e.content.seek(0)
+                    content_bytes = e.content.read()
+                else:
+                    content_bytes = e.content
+            
+            if content_bytes is None:
+                raise AttributeError("No se pudo extraer el contenido del archivo subido")
+
+            # Intentar decodificar con diferentes encodings
+            content = ""
+            for enc in ['utf-8', 'latin-1', 'cp1252', 'utf-16']:
+                try:
+                    content = content_bytes.decode(enc)
+                    break 
+                except UnicodeDecodeError:
+                    continue
+            else:
+                content = content_bytes.decode('utf-8', errors='ignore')
+
             links_to_download = parse_links_file(content, e.name)
             
             if links_to_download:
