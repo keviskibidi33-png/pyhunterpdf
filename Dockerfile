@@ -36,11 +36,11 @@ COPY . .
 RUN mkdir -p downloads temp_pdfs
 
 # Exponer puerto
-EXPOSE 8080
+EXPOSE 8085
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/ || exit 1
+    CMD curl -f http://localhost:8085/ || exit 1
 
 # Comando de inicio
 CMD ["python", "main.py"]

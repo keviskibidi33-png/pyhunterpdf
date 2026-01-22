@@ -10,7 +10,7 @@ services:
       dockerfile: Dockerfile
     container_name: pdf-hunter
     ports:
-      - "8080:8080"
+      - "8085:8085"
     volumes:
       # Persistir descargas entre reinicios
       - pdf_downloads:/app/downloads
@@ -19,10 +19,10 @@ services:
       - PYTHONUNBUFFERED=1
       # Para Coolify - la app escuchará en todas las interfaces
       - HOST=0.0.0.0
-      - PORT=8080
+      - PORT=8085
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8085/"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -34,7 +34,7 @@ services:
       - "traefik.http.routers.pdf-hunter.rule=Host(`py.geofal.com.pe`)"
       - "traefik.http.routers.pdf-hunter.entrypoints=websecure"
       - "traefik.http.routers.pdf-hunter.tls.certresolver=letsencrypt"
-      - "traefik.http.services.pdf-hunter.loadbalancer.server.port=8080"
+      - "traefik.http.services.pdf-hunter.loadbalancer.server.port=8085"
 
 volumes:
   pdf_downloads:

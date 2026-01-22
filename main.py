@@ -543,7 +543,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     ui.run(
         title='🎯 The PDF Hunter',
         host='0.0.0.0',
-        port=8080,
+        port=8085,
         reload=False,
         show=False
     )
