@@ -302,17 +302,24 @@ async def main_page():
     async def on_file_upload(e: events.UploadEventArguments):
         nonlocal links_to_download
         
-        content = e.content.read().decode('utf-8', errors='ignore')
-        links_to_download = parse_links_file(content, e.name)
-        
-        if links_to_download:
-            links_count.text = f'✅ Se cargaron {len(links_to_download):,} enlaces correctamente'
-            links_count.classes(replace='text-green-500 text-lg font-bold')
-            start_btn.enable()
-        else:
-            links_count.text = '❌ No se encontraron enlaces válidos en el archivo'
-            links_count.classes(replace='text-red-500 text-lg')
-            start_btn.disable()
+        try:
+            content = e.content.read().decode('utf-8', errors='ignore')
+            links_to_download = parse_links_file(content, e.name)
+            
+            if links_to_download:
+                links_count.set_text(f'✅ Se cargaron {len(links_to_download):,} enlaces correctamente')
+                links_count.classes(remove='text-gray-400', add='text-green-500 text-lg font-bold')
+                start_btn.enable()
+                ui.notify(f'✅ {len(links_to_download):,} enlaces cargados desde {e.name}', type='positive')
+            else:
+                links_count.set_text('❌ No se encontraron enlaces válidos en el archivo')
+                links_count.classes(remove='text-gray-400', add='text-red-500 text-lg')
+                start_btn.disable()
+                ui.notify('❌ No se encontraron enlaces válidos', type='negative')
+        except Exception as ex:
+            links_count.set_text(f'❌ Error al procesar: {str(ex)[:50]}')
+            links_count.classes(remove='text-gray-400', add='text-red-500 text-lg')
+            ui.notify(f'Error: {str(ex)}', type='negative')
     
     async def update_progress(result: dict):
         """Callback para actualizar UI después de cada descarga"""
