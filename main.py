@@ -211,46 +211,64 @@ def create_final_zip() -> Path:
 
 def determine_best_filename(final_url: str, initial_url: str, content_disposition: str) -> str:
     """
-    Determinación quirúrgica del nombre del archivo.
-    Regla Suprema: El código en la URL (slug) manda sobre cualquier header del servidor.
+    Fuerza el uso del slug de la URL INICIAL (ej: IN-IN-N-2605-25-CO12)
+    ignorando los nombres raros de la redirección final.
     """
     
-    # 1. Obtener posible nombre del servidor (para fallback)
-    server_filename = None
-    if 'filename=' in content_disposition:
-        match = re.search(r'filename=["\']?([^"\';\s]+)["\']?', content_disposition)
-        if match:
-            server_filename = match.group(1)
-            
-    # 2. Obtener slugs (códigos)
-    url_slug = final_url.split('/')[-1].split('?')[0]
-    url_slug_initial = initial_url.split('/')[-1].split('?')[0]
-    
-    # Lista de nombres genéricos a evitar si es posible
+    # Lista de nombres que NO queremos (por si acaso)
     GENERIC_NAMES = {
-        'informe.pdf', 'reporte.pdf', 'documento.pdf', 'descarga.pdf', 
-        'archivo.pdf', 'pdf.pdf', 'download.pdf', 'ver.pdf'
+        'login-download-file', 'download', 'file', 'archivo', 'documento', 'ver'
     }
 
-    # 3. Lógica de Decisión ESTRICTA
-    
-    # Caso A: Slug final válido (>3 chars) Y NO GENÉRICO -> GANADOR
-    if url_slug and len(url_slug) > 3 and url_slug.lower() not in GENERIC_NAMES:
-        return url_slug
+    def get_slug(url: str) -> str:
+        if not url: return ""
+        # Decodificar %20 y otros
+        from urllib.parse import unquote
+        url = unquote(url)
+        # Quitar parámetros (?id=...)
+        base = url.split('?')[0]
+        # Obtener lo que está después de la última barra /
+        slug = base.split('/')[-1]
         
-    # Caso B: Slug inicial válido (>3 chars) Y NO GENÉRICO -> GANADOR
-    if url_slug_initial and len(url_slug_initial) > 3 and url_slug_initial.lower() not in GENERIC_NAMES:
-        return url_slug_initial
-        
-    # Caso C: Fallback a nombre del servidor (aunque sea genérico, es lo que hay)
-    if server_filename:
-        # Si el servidor nos da un nombre específico (ej. "IN-2023.pdf") y no es genérico, lo usamos
-        if server_filename.lower() not in GENERIC_NAMES:
-            return server_filename
-        # Si es genérico, intentamos volver a usar algún slug aunque sea "raro", o nos quedamos con el servidor
+        # Limpieza especifica para tus links:
+        # Si termina en .pdf lo quitamos para normalizar
+        if slug.lower().endswith('.pdf'):
+            slug = slug[:-4]
+            
+        return slug.strip()
+
+    # 1. Extraemos el código de TU enlace original
+    slug_initial = get_slug(initial_url)
     
-    # Caso D: Último recurso, devolver el mejor candidato disponible
-    return server_filename or url_slug or "documento_desconocido.pdf"
+    # 2. Extraemos el código del enlace final (el raro)
+    slug_final = get_slug(final_url)
+
+    # =========================================================================
+    # REGLA DE ORO: La URL inicial MANDA
+    # =========================================================================
+    
+    # Si el slug inicial parece un código válido (tiene longitud y no es "download")
+    if slug_initial and len(slug_initial) > 4 and slug_initial.lower() not in GENERIC_NAMES:
+        return f"{slug_initial}.pdf"
+
+    # =========================================================================
+    # FALLBACKS (Solo si tu URL inicial estuviera vacía o rota)
+    # =========================================================================
+
+    # Intentar sacar nombre del servidor (Header Content-Disposition)
+    if 'filename=' in content_disposition:
+        match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';\s]+)["\']?', content_disposition, re.IGNORECASE)
+        if match:
+            server_name = match.group(1)
+            if server_name.lower().endswith('.pdf'):
+                return server_name
+            return f"{server_name}.pdf"
+
+    # Último recurso: Usar el nombre raro de la URL final
+    if slug_final and len(slug_final) > 4:
+        return f"{slug_final}.pdf"
+
+    return f"documento_sin_nombre_{datetime.now().strftime('%H%M%S')}.pdf"
 
 async def download_single_pdf(
     session: aiohttp.ClientSession,
