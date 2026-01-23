@@ -61,6 +61,7 @@ class DownloadState:
     
 state = DownloadState()
 executor = ThreadPoolExecutor(max_workers=4)
+csv_lock = asyncio.Lock()  # <--- AGREGA ESTA LÍNEA AQUÍ
 
 # =============================================================================
 # UTILIDADES
@@ -387,8 +388,13 @@ async def download_single_pdf(
         except Exception as e:
             result['error_detalle'] = f'{str(e)[:100]}'
     
-    # Guardar resultado final (sea éxito o el último error)
-    append_to_csv(result)
+    # BLOQUE CORREGIDO: Usar Lock para escribir en el CSV
+    async with csv_lock:
+        # Ejecutamos la escritura en un hilo aparte para no bloquear el loop principal
+        # pero protegidos por el Lock para que nadie más escriba a la vez.
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, append_to_csv, result)
+    
     await progress_callback(result)
     return result
 
