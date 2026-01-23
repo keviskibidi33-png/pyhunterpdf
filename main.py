@@ -31,10 +31,10 @@ MAX_REDIRECTS = 10
 MAX_CONCURRENT_DOWNLOADS = 10
 UI_TABLE_MAX_ROWS = 50
 
-# Regex mejorado para fechas (soporta YYYY-MM-DD y DD/MM/YYYY)
+# Regex mejorado para fechas (soporta YYYY-MM-DD, DD/MM/YYYY, DD-MM-YY y variantes con espacios)
 DATE_REGEX = re.compile(
-    r'(?:FECHA|F\.?)\s*(?:DE\s+)?EMISI[OÓ]N\s*[:\.]*\s*'
-    r'(\d{4}-\d{2}-\d{2}|\d{2}[/-]\d{2}[/-]\d{4})',
+    r'(?:FECHA|F\.?)\s*(?:DE\s+)?EMISI[OÓ]N[:\.\s]*'
+    r'(\d{2,4}[\.\-/]\s*\d{2}[\.\-/]\s*\d{2,4})',
     re.IGNORECASE
 )
 
@@ -190,7 +190,7 @@ async def download_single_pdf(
         'url_final': url,
         'cadena_redirecciones': url,
         'num_redirecciones': 0,
-        'status_descarga': 'ERROR',
+        'status_descarga': 'Error',
         'http_code': 0,
         'error_detalle': '',
         'fecha_emision_pdf': '',
@@ -228,10 +228,31 @@ async def download_single_pdf(
             if response.status == 200:
                 content_type = response.headers.get('Content-Type', '')
                 
+                # Intentar obtener nombre real desde Content-Disposition o URL
+                disposition = response.headers.get('Content-Disposition', '')
+                filename = None
+                
+                if 'filename=' in disposition:
+                    # Extraer el nombre entre comillas o hasta el punto y coma
+                    match = re.search(r'filename=["\']?([^"\';\s]+)["\']?', disposition)
+                    if match:
+                        filename = match.group(1)
+                
+                if not filename:
+                    # Fallback a la última parte de la URL
+                    filename = str(response.url).split('/')[-1].split('?')[0]
+                
+                # Limpiar caracteres inválidos
+                filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
+                
+                if not filename.lower().endswith('.pdf'):
+                    filename += '.pdf'
+                
+                # Asegurar que el nombre tenga el ID para evitar sobrescrituras
+                filename = f"{index:05d}_{filename}"
+                
                 # Verificar que sea PDF
-                if 'pdf' in content_type.lower() or str(response.url).lower().endswith('.pdf'):
-                    # Guardar archivo
-                    filename = f"pdf_{index:05d}.pdf"
+                if 'pdf' in content_type.lower() or filename.lower().endswith('.pdf'):
                     filepath = TEMP_DIR / filename
                     
                     content = await response.read()
@@ -240,7 +261,7 @@ async def download_single_pdf(
                     
                     result['archivo_guardado_como'] = filename
                     result['tamano_bytes'] = len(content)
-                    result['status_descarga'] = 'SUCCESS'
+                    result['status_descarga'] = 'Completado'
                     
                     # Extraer fecha en threadpool (no bloquea)
                     loop = asyncio.get_event_loop()
@@ -312,54 +333,110 @@ async def main_page():
     async def on_file_upload(e: events.UploadEventArguments):
         nonlocal links_to_download
         
+        # Debug seguro
+        print("DEBUG: Upload event received")
         try:
-            # NiceGUI 2.0+ Upload API
+            print(f"DEBUG: Event dir: {dir(e)}")
+            if hasattr(e, 'file'):
+                print(f"DEBUG: e.file type: {type(e.file)}")
+                print(f"DEBUG: e.file attributes: {dir(e.file)}")
+        except Exception as e_debug:
+            print(f"DEBUG: Could not inspect event: {e_debug}")
+
+        try:
             content_bytes = None
+            filename = "uploaded_file.txt" # Default
             
-            # Intentar obtener contenido de forma defensiva
-            if hasattr(e, 'content') and e.content:
-                if hasattr(e.content, 'read'):
-                    e.content.seek(0)
-                    content_bytes = e.content.read()
-                else:
-                    content_bytes = e.content
+            # Identificar el objeto que tiene los datos
+            source_obj = None
+            if hasattr(e, 'file') and e.file:
+                source_obj = e.file
+            elif hasattr(e, 'content') and e.content:
+                source_obj = e.content
+            
+            # Intentar obtener nombre del archivo
+            if hasattr(e, 'name'):
+                filename = e.name
+            elif source_obj and hasattr(source_obj, 'name'):
+                filename = source_obj.name
+            elif source_obj and hasattr(source_obj, 'filename'): # werkzeug/starlette style
+                filename = source_obj.filename
+            
+            print(f"DEBUG: Processing filename: {filename}")
+
+            if source_obj:
+                try:
+                    # Intentar leer como stream
+                    if hasattr(source_obj, 'read'):
+                        if hasattr(source_obj, 'seek'):
+                            source_obj.seek(0)
+                        
+                        # Manejo de read() asíncrono vs síncrono
+                        read_result = source_obj.read()
+                        if asyncio.iscoroutine(read_result):
+                            content_bytes = await read_result
+                        else:
+                            content_bytes = read_result
+                            
+                        print(f"DEBUG: Read {len(content_bytes) if content_bytes else 0} bytes from stream")
+                    
+                    # Intentar leer como bytes directo
+                    elif isinstance(source_obj, (bytes, bytearray)):
+                        content_bytes = source_obj
+                        print(f"DEBUG: Source is direct bytes, len: {len(content_bytes)}")
+
+                except Exception as read_err:
+                    print(f"DEBUG: Error reading source: {read_err}")
             
             if content_bytes is None:
-                raise AttributeError("No se pudo extraer el contenido del archivo subido")
+                raise ValueError(f"CRITICAL: Content is None. Event structure: {dir(e)}")
 
-            # Intentar decodificar con diferentes encodings
+            # Decodificación robusta
             content = ""
-            for enc in ['utf-8', 'latin-1', 'cp1252', 'utf-16']:
+            decoded = False
+            for encoding in ['utf-8', 'latin-1', 'cp1252']:
                 try:
-                    content = content_bytes.decode(enc)
-                    break 
-                except UnicodeDecodeError:
+                    content = content_bytes.decode(encoding)
+                    decoded = True
+                    print(f"DEBUG: Decoded successfully with {encoding}")
+                    break
+                except Exception:
                     continue
-            else:
+            
+            if not decoded:
                 content = content_bytes.decode('utf-8', errors='ignore')
+                print("DEBUG: Decoded with utf-8 (ignore errors)")
 
-            links_to_download = parse_links_file(content, e.name)
+            links_to_download = parse_links_file(content, filename)
             
             if links_to_download:
-                links_count.set_text(f'✅ Se cargaron {len(links_to_download):,} enlaces correctamente')
-                links_count.classes(remove='text-gray-400', add='text-green-500 text-lg font-bold')
+                msg = f'✅ Se cargaron {len(links_to_download):,} enlaces correctamente'
+                links_count.set_text(msg)
+                links_count.classes(remove='text-gray-400 text-red-500', add='text-green-500 text-lg font-bold')
                 start_btn.enable()
-                ui.notify(f'✅ {len(links_to_download):,} enlaces cargados desde {e.name}', type='positive')
+                ui.notify(msg, type='positive')
             else:
-                links_count.set_text('❌ No se encontraron enlaces válidos en el archivo')
-                links_count.classes(remove='text-gray-400', add='text-red-500 text-lg')
+                msg = '❌ No se encontraron enlaces válidos'
+                links_count.set_text(msg)
+                links_count.classes(remove='text-gray-400 text-green-500', add='text-red-500 text-lg')
                 start_btn.disable()
-                ui.notify('❌ No se encontraron enlaces válidos', type='negative')
+                ui.notify(msg, type='negative')
+                
         except Exception as ex:
-            links_count.set_text(f'❌ Error al procesar: {str(ex)[:50]}')
-            links_count.classes(remove='text-gray-400', add='text-red-500 text-lg')
-            ui.notify(f'Error: {str(ex)}', type='negative')
+            import traceback
+            traceback.print_exc()
+            error_msg = str(ex)
+            print(f"ERROR UI: {error_msg}")
+            
+            links_count.set_text(f'❌ Error: {error_msg}')
+            links_count.classes(remove='text-gray-400 text-green-500', add='text-red-500 text-lg')
+            ui.notify(f'Error: {error_msg}', type='negative', close_button=True, multi_line=True)
     
     async def update_progress(result: dict):
         """Callback para actualizar UI después de cada descarga"""
         state.completed += 1
         
-        if result['status_descarga'] == 'SUCCESS':
+        if result['status_descarga'] == 'Completado':
             state.success_count += 1
         else:
             state.error_count += 1
@@ -379,7 +456,7 @@ async def main_page():
         table.rows = [
             {
                 'url': r['url_inicial'][:60] + ('...' if len(r['url_inicial']) > 60 else ''),
-                'status': '✅ OK' if r['status_descarga'] == 'SUCCESS' else '❌ Error',
+                'status': '✅ Completado' if r['status_descarga'] == 'Completado' else '❌ Error',
                 'redirects': f"{r['num_redirecciones']} saltos",
                 'date': r['fecha_emision_pdf'][:20] if r['fecha_emision_pdf'] else '-',
                 'error': r['error_detalle'][:40] if r['error_detalle'] else '-'
