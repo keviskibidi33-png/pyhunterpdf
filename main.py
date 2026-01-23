@@ -256,28 +256,32 @@ async def download_single_pdf(
             if response.status == 200:
                 content_type = response.headers.get('Content-Type', '')
                 
-                # Intentar obtener nombre real desde Content-Disposition o URL
+                # 1. Obtener posible nombre del servidor
                 disposition = response.headers.get('Content-Disposition', '')
-                filename = None
-                
+                server_filename = None
                 if 'filename=' in disposition:
-                    # Extraer el nombre entre comillas o hasta el punto y coma
                     match = re.search(r'filename=["\']?([^"\';\s]+)["\']?', disposition)
                     if match:
-                        filename = match.group(1)
+                        server_filename = match.group(1)
                 
-                if not filename:
-                    # Fallback a la última parte de la URL
-                    filename = str(response.url).split('/')[-1].split('?')[0]
+                # 2. Obtener slug de la URL (el código único)
+                url_slug = str(response.url).split('/')[-1].split('?')[0]
                 
+                # 3. Lógica inteligente: Si el nombre del servidor es genérico, usar el de la URL
+                generic_names = ['informe.pdf', 'reporte.pdf', 'documento.pdf', 'descarga.pdf', 'archivo.pdf', 'pdf.pdf']
+                
+                if server_filename and server_filename.lower() not in generic_names:
+                    filename = server_filename
+                elif url_slug and len(url_slug) > 3:
+                    filename = url_slug
+                else:
+                    filename = server_filename or url_slug or "documento.pdf"
+
                 # Limpiar caracteres inválidos
                 filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
                 
                 if not filename.lower().endswith('.pdf'):
                     filename += '.pdf'
-                
-                # REINTRODUCIR PREFIJO DE ID PARA UNICIDAD (Evita que INFORME.pdf se sobrescriba)
-                filename = f"{index:05d}_{filename}"
                 
                 # Verificar que sea PDF
                 if 'pdf' in content_type.lower() or filename.lower().endswith('.pdf'):
