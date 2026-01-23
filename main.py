@@ -64,24 +64,47 @@ executor = ThreadPoolExecutor(max_workers=4)
 # UTILIDADES
 # =============================================================================
 def cleanup():
-    """Limpia archivos de ejecuciones anteriores"""
+    """Limpia archivos de ejecuciones anteriores de forma robusta"""
+    def safe_delete(path: Path):
+        if not path.exists():
+            return
+        if path.is_file():
+            try:
+                path.unlink()
+            except PermissionError:
+                print(f"WARN: No se pudo eliminar {path} (está siendo usado)")
+        elif path.is_dir():
+            for child in path.iterdir():
+                safe_delete(child)
+            try:
+                path.rmdir()
+            except (PermissionError, OSError):
+                 print(f"WARN: No se pudo eliminar carpeta {path}")
+
+    # Limpiar contenido sin borrar las carpetas base necesariamente
     if TEMP_DIR.exists():
-        shutil.rmtree(TEMP_DIR)
+        for f in TEMP_DIR.glob('*'): safe_delete(f)
     if DOWNLOAD_DIR.exists():
-        shutil.rmtree(DOWNLOAD_DIR)
+        for f in DOWNLOAD_DIR.glob('*'):
+            # Intentar borrar todo menos el CSV si falla
+            safe_delete(f)
     
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     
-    # Crear CSV con headers
-    with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            'id', 'url_inicial', 'url_final', 'cadena_redirecciones',
-            'num_redirecciones', 'status_descarga', 'http_code', 
-            'error_detalle', 'fecha_emision_pdf', 'archivo_guardado_como',
-            'tamano_bytes', 'timestamp'
-        ])
+    # Crear CSV con headers de forma segura
+    try:
+        with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'id', 'url_inicial', 'url_final', 'cadena_redirecciones',
+                'num_redirecciones', 'status_descarga', 'http_code', 
+                'error_detalle', 'fecha_emision_pdf', 'archivo_guardado_como',
+                'tamano_bytes', 'timestamp'
+            ])
+    except PermissionError:
+        ui.notify('⚠️ El archivo CSV está abierto en otro programa. Ciérralo para actualizar los resultados.', type='warning', duration=10)
+        print("ERROR: Permission denied on CSV file")
 
 def extract_emission_date(pdf_path: Path) -> str:
     """Extrae la fecha de emisión del PDF usando pdfplumber"""
@@ -140,23 +163,26 @@ def parse_links_file(content: str, filename: str) -> list[str]:
     return links
 
 def append_to_csv(row: dict):
-    """Añade una fila al CSV de auditoría (append, no memoria)"""
-    with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            row['id'],
-            row['url_inicial'],
-            row['url_final'],
-            row['cadena_redirecciones'],
-            row['num_redirecciones'],
-            row['status_descarga'],
-            row['http_code'],
-            row['error_detalle'],
-            row['fecha_emision_pdf'],
-            row['archivo_guardado_como'],
-            row['tamano_bytes'],
-            row['timestamp']
-        ])
+    """Añade una fila al CSV de auditoría de forma segura"""
+    try:
+        with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                row['id'],
+                row['url_inicial'],
+                row['url_final'],
+                row['cadena_redirecciones'],
+                row['num_redirecciones'],
+                row['status_descarga'],
+                row['http_code'],
+                row['error_detalle'],
+                row['fecha_emision_pdf'],
+                row['archivo_guardado_como'],
+                row['tamano_bytes'],
+                row['timestamp']
+            ])
+    except PermissionError:
+        print(f"WARN: No se pudo escribir en el CSV (bloqueado) para ID {row['id']}")
 
 def create_final_zip() -> Path:
     """Crea el ZIP final con PDFs y CSV"""
