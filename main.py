@@ -274,9 +274,6 @@ async def download_single_pdf(
                 if not filename.lower().endswith('.pdf'):
                     filename += '.pdf'
                 
-                # Asegurar que el nombre tenga el ID para evitar sobrescrituras
-                filename = f"{index:05d}_{filename}"
-                
                 # Verificar que sea PDF
                 if 'pdf' in content_type.lower() or filename.lower().endswith('.pdf'):
                     filepath = TEMP_DIR / filename
