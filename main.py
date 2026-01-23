@@ -107,6 +107,9 @@ def cleanup():
     except PermissionError:
         ui.notify('⚠️ El archivo CSV está abierto en otro programa. Ciérralo para actualizar los resultados.', type='warning', duration=10)
         print("ERROR: Permission denied on CSV file")
+    except Exception as e:
+        print(f"CRITICAL ERROR creating CSV: {e}")
+        ui.notify(f'⚠️ Error creando CSV: {e}', type='negative')
 
 def extract_emission_date(pdf_path: Path) -> str:
     """Extrae la fecha de emisión del PDF usando pdfplumber"""
@@ -204,6 +207,51 @@ def create_final_zip() -> Path:
 # =============================================================================
 # MOTOR DE DESCARGA ASYNC
 # =============================================================================
+
+
+def determine_best_filename(final_url: str, initial_url: str, content_disposition: str) -> str:
+    """
+    Determinación quirúrgica del nombre del archivo.
+    Regla Suprema: El código en la URL (slug) manda sobre cualquier header del servidor.
+    """
+    
+    # 1. Obtener posible nombre del servidor (para fallback)
+    server_filename = None
+    if 'filename=' in content_disposition:
+        match = re.search(r'filename=["\']?([^"\';\s]+)["\']?', content_disposition)
+        if match:
+            server_filename = match.group(1)
+            
+    # 2. Obtener slugs (códigos)
+    url_slug = final_url.split('/')[-1].split('?')[0]
+    url_slug_initial = initial_url.split('/')[-1].split('?')[0]
+    
+    # Lista de nombres genéricos a evitar si es posible
+    GENERIC_NAMES = {
+        'informe.pdf', 'reporte.pdf', 'documento.pdf', 'descarga.pdf', 
+        'archivo.pdf', 'pdf.pdf', 'download.pdf', 'ver.pdf'
+    }
+
+    # 3. Lógica de Decisión ESTRICTA
+    
+    # Caso A: Slug final válido (>3 chars) Y NO GENÉRICO -> GANADOR
+    if url_slug and len(url_slug) > 3 and url_slug.lower() not in GENERIC_NAMES:
+        return url_slug
+        
+    # Caso B: Slug inicial válido (>3 chars) Y NO GENÉRICO -> GANADOR
+    if url_slug_initial and len(url_slug_initial) > 3 and url_slug_initial.lower() not in GENERIC_NAMES:
+        return url_slug_initial
+        
+    # Caso C: Fallback a nombre del servidor (aunque sea genérico, es lo que hay)
+    if server_filename:
+        # Si el servidor nos da un nombre específico (ej. "IN-2023.pdf") y no es genérico, lo usamos
+        if server_filename.lower() not in GENERIC_NAMES:
+            return server_filename
+        # Si es genérico, intentamos volver a usar algún slug aunque sea "raro", o nos quedamos con el servidor
+    
+    # Caso D: Último recurso, devolver el mejor candidato disponible
+    return server_filename or url_slug or "documento_desconocido.pdf"
+
 async def download_single_pdf(
     session: aiohttp.ClientSession,
     url: str,
@@ -256,26 +304,12 @@ async def download_single_pdf(
             if response.status == 200:
                 content_type = response.headers.get('Content-Type', '')
                 
-                # 1. Obtener posible nombre del servidor
-                disposition = response.headers.get('Content-Disposition', '')
-                server_filename = None
-                if 'filename=' in disposition:
-                    match = re.search(r'filename=["\']?([^"\';\s]+)["\']?', disposition)
-                    if match:
-                        server_filename = match.group(1)
-                
-                # 2. Obtener slug de la URL (el código único)
-                url_slug = str(response.url).split('/')[-1].split('?')[0]
-                
-                # 3. Lógica inteligente: Si el nombre del servidor es genérico, usar el de la URL
-                generic_names = ['informe.pdf', 'reporte.pdf', 'documento.pdf', 'descarga.pdf', 'archivo.pdf', 'pdf.pdf']
-                
-                if server_filename and server_filename.lower() not in generic_names:
-                    filename = server_filename
-                elif url_slug and len(url_slug) > 3:
-                    filename = url_slug
-                else:
-                    filename = server_filename or url_slug or "documento.pdf"
+                # Lógica extraída para validación quirúrgica
+                filename = determine_best_filename(
+                    final_url=str(response.url),
+                    initial_url=url,
+                    content_disposition=disposition
+                )
 
                 # Limpiar caracteres inválidos
                 filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
@@ -286,6 +320,17 @@ async def download_single_pdf(
                 # Verificar que sea PDF
                 if 'pdf' in content_type.lower() or filename.lower().endswith('.pdf'):
                     filepath = TEMP_DIR / filename
+                    
+                    # Evitar sobrescritura (Colisiones)
+                    counter = 1
+                    stem = filepath.stem
+                    suffix = filepath.suffix
+                    while filepath.exists():
+                        filepath = TEMP_DIR / f"{stem}_({counter}){suffix}"
+                        counter += 1
+                        
+                    # Actualizar nombre final si cambió
+                    filename = filepath.name
                     
                     content = await response.read()
                     async with aiofiles.open(filepath, 'wb') as f:
