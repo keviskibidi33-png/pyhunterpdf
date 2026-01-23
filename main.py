@@ -456,44 +456,51 @@ async def main_page():
             ui.notify(f'Error: {error_msg}', type='negative', close_button=True, multi_line=True)
     
     async def update_progress(result: dict):
-        """Callback para actualizar UI después de cada descarga"""
-        state.completed += 1
-        
-        if result['status_descarga'] == 'Completado':
-            state.success_count += 1
-        else:
-            state.error_count += 1
-        
-        # Mantener solo los últimos 50 en memoria para la tabla
-        state.recent_downloads.insert(0, result)
-        if len(state.recent_downloads) > UI_TABLE_MAX_ROWS:
-            state.recent_downloads.pop()
-        
-        # Actualizar UI
-        progress_bar.value = state.completed / state.total if state.total > 0 else 0
-        progress_text.text = f'{state.completed:,} / {state.total:,}'
-        success_count.text = f'✅ {state.success_count:,}'
-        error_count.text = f'❌ {state.error_count:,}'
-        
-        # Actualizar tabla
-        table.rows = [
-            {
-                'url': r['url_inicial'][:60] + ('...' if len(r['url_inicial']) > 60 else ''),
-                'status': '✅ Completado' if r['status_descarga'] == 'Completado' else '❌ Error',
-                'redirects': f"{r['num_redirecciones']} saltos",
-                'date': r['fecha_emision_pdf'][:20] if r['fecha_emision_pdf'] else '-',
-                'error': r['error_detalle'][:40] if r['error_detalle'] else '-'
-            }
-            for r in state.recent_downloads[:15]
-        ]
-        
-        await asyncio.sleep(0)  # Yield para actualizar UI
+        """Callback para actualizar UI después de cada descarga de forma segura"""
+        try:
+            state.completed += 1
+            
+            if result['status_descarga'] == 'Completado':
+                state.success_count += 1
+            else:
+                state.error_count += 1
+            
+            # Mantener solo los últimos 50 en memoria para la tabla
+            state.recent_downloads.insert(0, result)
+            if len(state.recent_downloads) > UI_TABLE_MAX_ROWS:
+                state.recent_downloads.pop()
+            
+            # Actualizar UI de forma segura
+            progress_bar.value = state.completed / state.total if state.total > 0 else 0
+            progress_text.text = f'{state.completed:,} / {state.total:,}'
+            success_count.text = f'✅ {state.success_count:,}'
+            error_count.text = f'❌ {state.error_count:,}'
+            
+            # Actualizar tabla
+            table.rows = [
+                {
+                    'url': r['url_inicial'][:60] + ('...' if len(r['url_inicial']) > 60 else ''),
+                    'status': '✅ Completado' if r['status_descarga'] == 'Completado' else '❌ Error',
+                    'redirects': f"{r['num_redirecciones']} saltos",
+                    'date': r['fecha_emision_pdf'][:20] if r['fecha_emision_pdf'] else '-',
+                    'error': r['error_detalle'][:40] if r['error_detalle'] else '-'
+                }
+                for r in state.recent_downloads[:15]
+            ]
+            
+            await asyncio.sleep(0)  # Yield para actualizar UI
+        except Exception:
+            # Si el elemento falló (ej por refresh), ignoramos silenciosamente
+            # ya que el estado del backend sigue procesando
+            pass
     
     async def start_download():
         nonlocal links_to_download
         
         if not links_to_download:
-            ui.notify('⚠️ Primero carga un archivo con enlaces', type='warning')
+            try:
+                ui.notify('⚠️ Primero carga un archivo con enlaces', type='warning')
+            except Exception: pass
             return
         
         # Limpiar estado
@@ -507,54 +514,68 @@ async def main_page():
         state.is_paused = False
         state.recent_downloads = []
         
-        # Actualizar UI
-        start_btn.disable()
-        pause_btn.enable()
-        stop_btn.enable()
-        download_btn.disable()
-        upload.disable()
-        
-        progress_bar.value = 0
-        progress_text.text = f'0 / {state.total:,}'
-        
-        ui.notify(f'🚀 Iniciando descarga de {state.total:,} archivos...', type='positive')
+        # Actualizar UI de forma segura
+        try:
+            start_btn.disable()
+            pause_btn.enable()
+            stop_btn.enable()
+            download_btn.disable()
+            upload.disable()
+            
+            progress_bar.value = 0
+            progress_text.text = f'0 / {state.total:,}'
+            
+            ui.notify(f'🚀 Iniciando descarga de {state.total:,} archivos...', type='positive')
+        except Exception: pass
         
         try:
             await download_all_pdfs(links_to_download, update_progress)
         finally:
             state.is_running = False
-            start_btn.enable()
-            pause_btn.disable()
-            stop_btn.disable()
-            download_btn.enable()
-            upload.enable()
-            
-            ui.notify(
-                f'✨ Proceso completado: {state.success_count:,} OK, {state.error_count:,} errores',
-                type='positive' if state.error_count == 0 else 'warning'
-            )
+            try:
+                start_btn.enable()
+                pause_btn.disable()
+                stop_btn.disable()
+                download_btn.enable()
+                upload.enable()
+                
+                ui.notify(
+                    f'✨ Proceso completado: {state.success_count:,} OK, {state.error_count:,} errores',
+                    type='positive' if state.error_count == 0 else 'warning'
+                )
+            except Exception: pass
     
     def pause_download():
         state.is_paused = not state.is_paused
-        pause_btn.text = '▶️ Reanudar' if state.is_paused else '⏸️ Pausar'
-        ui.notify('⏸️ Pausado' if state.is_paused else '▶️ Reanudado')
+        try:
+            pause_btn.text = '▶️ Reanudar' if state.is_paused else '⏸️ Pausar'
+            ui.notify('⏸️ Pausado' if state.is_paused else '▶️ Reanudado')
+        except Exception: pass
     
     def stop_download():
         state.is_running = False
-        ui.notify('🛑 Deteniendo...', type='warning')
+        try:
+            ui.notify('🛑 Deteniendo...', type='warning')
+        except Exception: pass
     
     async def download_results():
         if not CSV_FILE.exists():
-            ui.notify('⚠️ No hay resultados para descargar', type='warning')
+            try:
+                ui.notify('⚠️ No hay resultados para descargar', type='warning')
+            except Exception: pass
             return
         
-        ui.notify('📦 Creando ZIP...', type='info')
+        try:
+            ui.notify('📦 Creando ZIP...', type='info')
+        except Exception: pass
         
         loop = asyncio.get_event_loop()
         zip_path = await loop.run_in_executor(executor, create_final_zip)
         
-        ui.download(str(zip_path))
-        ui.notify('✅ Descarga iniciada', type='positive')
+        try:
+            ui.download(str(zip_path))
+            ui.notify('✅ Descarga iniciada', type='positive')
+        except Exception: pass
     
     # =========================================================================
     # LAYOUT
