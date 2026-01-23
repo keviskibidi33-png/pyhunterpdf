@@ -8,8 +8,15 @@ venv/
 # Project specific
 downloads/
 temp_pdfs/
+PDFINCAL/
 *.zip
 *.csv
+*.txt
+!requirements.txt
+
+# Scripts / Debug
+audit_downloads.py
+test_names.py
 
 # IDEs
 .vscode/
