@@ -258,8 +258,15 @@ async def download_single_pdf(
     index: int,
     progress_callback
 ) -> dict:
-    """Descarga un PDF siguiendo redirecciones y rastrea la cadena completa"""
+    """Descarga un PDF con validación real de magic bytes y reintentos"""
     
+    # -----------------------------------------------------------
+    # CONFIGURACIÓN DE REINTENTOS Y VALIDACIÓN
+    # -----------------------------------------------------------
+    MAX_RETRIES = 3  # Intentar 3 veces antes de rendirse
+    RETRY_DELAY = 2  # Segundos de espera entre intentos
+    # -----------------------------------------------------------
+
     result = {
         'id': index,
         'url_inicial': url,
@@ -274,98 +281,97 @@ async def download_single_pdf(
         'tamano_bytes': 0,
         'timestamp': datetime.now().isoformat()
     }
-    
-    try:
-        async with session.get(
-            url, 
-            headers=HEADERS,
-            max_redirects=MAX_REDIRECTS,
-            timeout=aiohttp.ClientTimeout(total=60),
-            allow_redirects=True
-        ) as response:
-            
-            # Registrar cadena de redirecciones
-            redirect_chain = [url]
-            for hist in response.history:
-                redirect_chain.append(str(hist.url))
-            redirect_chain.append(str(response.url))
-            
-            # Eliminar duplicados consecutivos
-            unique_chain = [redirect_chain[0]]
-            for u in redirect_chain[1:]:
-                if u != unique_chain[-1]:
-                    unique_chain.append(u)
-            
-            result['cadena_redirecciones'] = ' -> '.join(unique_chain)
-            result['num_redirecciones'] = len(unique_chain) - 1
-            result['url_final'] = str(response.url)
-            result['http_code'] = response.status
-            
-            if response.status == 200:
-                content_type = response.headers.get('Content-Type', '')
-                
-                # Lógica extraída para validación quirúrgica
-                filename = determine_best_filename(
-                    final_url=str(response.url),
-                    initial_url=url,
-                    content_disposition=disposition
-                )
 
-                # Limpiar caracteres inválidos
-                filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Añadimos un pequeño delay aleatorio para no parecer un robot agresivo
+            if attempt > 0:
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+            
+            async with session.get(
+                url, 
+                headers=HEADERS, # Asegúrate de que HEADERS tenga un User-Agent de navegador real
+                max_redirects=MAX_REDIRECTS,
+                timeout=aiohttp.ClientTimeout(total=90), # Subimos timeout a 90s
+                allow_redirects=True,
+                ssl=False # Ignorar errores SSL
+            ) as response:
                 
-                if not filename.lower().endswith('.pdf'):
-                    filename += '.pdf'
+                # Mapeo de redirecciones
+                redirect_chain = [url] + [str(h.url) for h in response.history] + [str(response.url)]
+                # Limpiar duplicados manteniendo orden
+                seen = set()
+                unique_chain = [x for x in redirect_chain if not (x in seen or seen.add(x))]
                 
-                # Verificar que sea PDF
-                if 'pdf' in content_type.lower() or filename.lower().endswith('.pdf'):
-                    filepath = TEMP_DIR / filename
+                result['cadena_redirecciones'] = ' -> '.join(unique_chain)
+                result['num_redirecciones'] = len(unique_chain) - 1
+                result['url_final'] = str(response.url)
+                result['http_code'] = response.status
+                
+                if response.status == 200:
+                    content = await response.read()
                     
-                    # Evitar sobrescritura (Colisiones)
+                    # --- VALIDACIÓN DE BYTES MÁGICOS (La prueba definitiva) ---
+                    # Un PDF real SIEMPRE empieza con %PDF
+                    if not content.startswith(b'%PDF'):
+                        # Si es HTML disfrazado, mostramos el título de la página como error
+                        error_preview = content[:200].decode('utf-8', errors='ignore').replace('\n', ' ')
+                        if '<html' in error_preview.lower() or '<!doctype' in error_preview.lower():
+                            raise ValueError(f"Servidor devolvió HTML/Captcha en lugar de PDF: {error_preview[:50]}...")
+                        else:
+                            # A veces envían binarios corruptos
+                            raise ValueError(f"El archivo descargado no es un PDF válido (Header incorrecto)")
+
+                    # Si pasa la validación, procedemos a guardar
+                    content_disposition = response.headers.get('Content-Disposition', '')
+                    filename = determine_best_filename(str(response.url), url, content_disposition)
+                    
+                    # Limpieza segura
+                    filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
+                    # Forzamos extensión .pdf si no la tiene (ya validamos que el contenido ES pdf)
+                    if not filename.lower().endswith('.pdf'):
+                        filename += '.pdf'
+                    
+                    # Guardar archivo
+                    filepath = TEMP_DIR / filename
                     counter = 1
                     stem = filepath.stem
-                    suffix = filepath.suffix
-                    while filepath.exists():
-                        filepath = TEMP_DIR / f"{stem}_({counter}){suffix}"
+                    while filepath.exists(): # Evitar sobrescribir
+                        filepath = TEMP_DIR / f"{stem}_({counter}).pdf"
                         counter += 1
                         
-                    # Actualizar nombre final si cambió
-                    filename = filepath.name
-                    
-                    content = await response.read()
                     async with aiofiles.open(filepath, 'wb') as f:
                         await f.write(content)
                     
-                    result['archivo_guardado_como'] = filename
+                    result['archivo_guardado_como'] = filepath.name
                     result['tamano_bytes'] = len(content)
                     result['status_descarga'] = 'Completado'
+                    result['error_detalle'] = '' # Limpiar errores previos si hubo reintentos
                     
-                    # Extraer fecha en threadpool (no bloquea)
+                    # Extraer fecha (fuera del hilo principal)
                     loop = asyncio.get_event_loop()
-                    fecha = await loop.run_in_executor(
-                        executor, 
-                        extract_emission_date, 
-                        filepath
-                    )
+                    fecha = await loop.run_in_executor(executor, extract_emission_date, filepath)
                     result['fecha_emision_pdf'] = fecha
-                else:
-                    result['error_detalle'] = f'No es PDF: {content_type[:50]}'
-            else:
-                result['error_detalle'] = f'HTTP {response.status}'
+                    
+                    break # ¡Éxito! Salir del bucle de reintentos
                 
-    except asyncio.TimeoutError:
-        result['error_detalle'] = 'Timeout (60s)'
-    except aiohttp.ClientError as e:
-        result['error_detalle'] = f'Error de red: {str(e)[:100]}'
-    except Exception as e:
-        result['error_detalle'] = f'Error: {str(e)[:100]}'
+                elif response.status in [429, 503, 502, 504]:
+                    # Errores temporales del servidor -> Reintentar
+                    result['error_detalle'] = f'HTTP {response.status} (Reintentando...)'
+                    continue 
+                else:
+                    # Errores fatales (404, 403 permanente) -> No reintentar
+                    result['error_detalle'] = f'HTTP {response.status}'
+                    break
+
+        except asyncio.TimeoutError:
+            result['error_detalle'] = f'Timeout (Intento {attempt+1}/{MAX_RETRIES})'
+        except Exception as e:
+            result['error_detalle'] = f'{str(e)[:100]}'
     
-    # Escribir al CSV inmediatamente (no acumular en memoria)
+    # Guardar resultado final (sea éxito o el último error)
     append_to_csv(result)
-    
-    # Actualizar callback para UI
     await progress_callback(result)
-    
     return result
 
 async def download_all_pdfs(links: list[str], progress_callback):
