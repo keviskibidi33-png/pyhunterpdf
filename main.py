@@ -659,9 +659,11 @@ async def main_page():
                 upload.disable()
                 pause_btn.text = '▶️ Reanudar' if state.is_paused else '⏸️ Pausar'
             else:
-                # Solo habilitar inicio si hay links cargados y no está corriendo
-                if state.links_to_download:
-                    start_btn.enable()
+                # Mostrar mensaje de éxito si ya terminó y hubo progreso
+                if state.total > 0 and state.completed >= state.total:
+                    links_count.set_text(f'✨ ¡Análisis completado! ({state.success_count} OK, {state.error_count} Errores)')
+                    links_count.classes(remove='text-gray-400 text-red-500', add='text-green-500 text-lg font-bold')
+                elif state.links_to_download:
                     links_count.set_text(f'✅ {len(state.links_to_download):,} enlaces listos ({state.current_filename})')
                     links_count.classes(remove='text-gray-400 text-red-500', add='text-green-500 text-lg font-bold')
                 
