@@ -66,6 +66,9 @@ csv_lock = asyncio.Lock()  # <--- AGREGA ESTA LÍNEA AQUÍ
 # =============================================================================
 # UTILIDADES
 # =============================================================================
+# =============================================================================
+# UTILIDADES
+# =============================================================================
 def cleanup():
     """Limpia archivos de ejecuciones anteriores de forma robusta"""
     def safe_delete(path: Path):
@@ -95,15 +98,18 @@ def cleanup():
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     
-    # Crear CSV con headers de forma segura
+    # Crear CSV con headers solicitados
     try:
         with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                'id', 'url_inicial', 'url_final', 'cadena_redirecciones',
-                'num_redirecciones', 'status_descarga', 'http_code', 
-                'error_detalle', 'fecha_emision_pdf', 'archivo_guardado_como',
-                'tamano_bytes', 'timestamp'
+                'TIPO DE INFORME',
+                'NOMBRE DEL PDF',
+                'CODIGO DEL ENSAYO',
+                'LINK ENVIADO A INACAL',
+                'LINK REDIRECCIONADO',
+                'FECHA DE INFORME',
+                'ESTADO_DETALLE' # Extra para debug de errores
             ])
     except PermissionError:
         ui.notify('⚠️ El archivo CSV está abierto en otro programa. Ciérralo para actualizar los resultados.', type='warning', duration=10)
@@ -112,19 +118,61 @@ def cleanup():
         print(f"CRITICAL ERROR creating CSV: {e}")
         ui.notify(f'⚠️ Error creando CSV: {e}', type='negative')
 
-def extract_emission_date(pdf_path: Path) -> str:
-    """Extrae la fecha de emisión del PDF usando pdfplumber"""
+def extract_pdf_metadata(pdf_path: Path) -> dict:
+    """
+    Extrae metadata específica del PDF:
+    - Tipo de informe (INFORME DE ENSAYO, CERTIFICADO, etc.)
+    - Código/N° de informe
+    - Fecha de emisión
+    """
+    metadata = {
+        'tipo_informe': 'DESCONOCIDO',
+        'codigo_ensayo': 'NO ENCONTRADO',
+        'fecha_informe': 'NO ENCONTRADA'
+    }
+    
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            # Buscar en las primeras 3 páginas
-            for i, page in enumerate(pdf.pages[:3]):
-                text = page.extract_text() or ""
-                match = DATE_REGEX.search(text)
-                if match:
-                    return match.group(1)
-        return "NO ENCONTRADA"
+            # Analizar solo las primeras 2 páginas para eficiencia
+            full_text = ""
+            for page in pdf.pages[:2]:
+                text = page.extract_text()
+                if text:
+                    full_text += text + "\n"
+            
+            full_text_upper = full_text.upper()
+
+            # 1. DETECTAR TIPO DE INFORME
+            tipos_conocidos = [
+                'INFORME DE ENSAYO', 
+                'CERTIFICADO DE CALIBRACIÓN', 'CERTIFICADO DE CALIBRACION',
+                'INFORME DE INSPECCIÓN', 'INFORME DE INSPECCION',
+                'INFORME TÉCNICO', 'INFORME TECNICO',
+                'REPORTE DE ENSAYO',
+                'CONSTANCIA DE VERIFICACIÓN', 'CONSTANCIA DE VERIFICACION'
+            ]
+            
+            for tipo in tipos_conocidos:
+                if tipo in full_text_upper:
+                    metadata['tipo_informe'] = tipo
+                    break
+            
+            # 2. DETECTAR CÓDIGO (Heurística simple)
+            # Busca patrones como "N°: XXX-2023" o "Informe N° XXX"
+            # Regex: (N[°º]|CODIGO|CÓDIGO|REF) <separadores> (valor alfanumérico con -/.)
+            code_match = re.search(r'(?:N[°º]|C[óo]digo|Ref\.?)\s*[:\.]?\s*([A-Z0-9\-\/]+)', full_text, re.IGNORECASE)
+            if code_match:
+                metadata['codigo_ensayo'] = code_match.group(1).strip()
+            
+            # 3. DETECTAR FECHA (Usando el regex global existente)
+            date_match = DATE_REGEX.search(full_text)
+            if date_match:
+                metadata['fecha_informe'] = date_match.group(1).strip()
+
     except Exception as e:
-        return f"ERROR: {str(e)[:50]}"
+        print(f"Error extrayendo metadata de {pdf_path.name}: {e}")
+        
+    return metadata
 
 def parse_links_file(content: str, filename: str) -> list[str]:
     """Parsea archivo .txt o .csv para extraer links y normaliza caracteres extraños"""
@@ -169,26 +217,21 @@ def parse_links_file(content: str, filename: str) -> list[str]:
     return links
 
 def append_to_csv(row: dict):
-    """Añade una fila al CSV de auditoría de forma segura"""
+    """Añade una fila al CSV de auditoría con el NUEVO FORMATO"""
     try:
         with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                row['id'],
-                row['url_inicial'],
-                row['url_final'],
-                row['cadena_redirecciones'],
-                row['num_redirecciones'],
-                row['status_descarga'],
-                row['http_code'],
-                row['error_detalle'],
-                row['fecha_emision_pdf'],
-                row['archivo_guardado_como'],
-                row['tamano_bytes'],
-                row['timestamp']
+                row.get('tipo_informe', ''),
+                row.get('nombre_pdf', ''),
+                row.get('codigo_ensayo', ''),
+                row.get('link_enviado', ''),
+                row.get('link_final', ''),
+                row.get('fecha_informe', ''),
+                row.get('error_detalle', '')
             ])
     except PermissionError:
-        print(f"WARN: No se pudo escribir en el CSV (bloqueado) para ID {row['id']}")
+        print(f"WARN: No se pudo escribir en el CSV (bloqueado)")
 
 def create_final_zip() -> Path:
     """Crea el ZIP final con PDFs y CSV"""
@@ -287,18 +330,14 @@ async def download_single_pdf(
     # -----------------------------------------------------------
 
     result = {
-        'id': index,
-        'url_inicial': url,
-        'url_final': url,
-        'cadena_redirecciones': url,
-        'num_redirecciones': 0,
-        'status_descarga': 'Error',
-        'http_code': 0,
+        'tipo_informe': '',
+        'nombre_pdf': '',
+        'codigo_ensayo': '',
+        'link_enviado': url,
+        'link_final': '',
+        'fecha_informe': '',
         'error_detalle': '',
-        'fecha_emision_pdf': '',
-        'archivo_guardado_como': '',
-        'tamano_bytes': 0,
-        'timestamp': datetime.now().isoformat()
+        'status_descarga': 'Pendiente' # Interno para UI
     }
 
     for attempt in range(MAX_RETRIES):
@@ -316,16 +355,7 @@ async def download_single_pdf(
                 ssl=False # Ignorar errores SSL
             ) as response:
                 
-                # Mapeo de redirecciones
-                redirect_chain = [url] + [str(h.url) for h in response.history] + [str(response.url)]
-                # Limpiar duplicados manteniendo orden
-                seen = set()
-                unique_chain = [x for x in redirect_chain if not (x in seen or seen.add(x))]
-                
-                result['cadena_redirecciones'] = ' -> '.join(unique_chain)
-                result['num_redirecciones'] = len(unique_chain) - 1
-                result['url_final'] = str(response.url)
-                result['http_code'] = response.status
+                result['link_final'] = str(response.url)
                 
                 if response.status == 200:
                     content = await response.read()
@@ -362,15 +392,17 @@ async def download_single_pdf(
                     async with aiofiles.open(filepath, 'wb') as f:
                         await f.write(content)
                     
-                    result['archivo_guardado_como'] = filepath.name
-                    result['tamano_bytes'] = len(content)
+                    result['nombre_pdf'] = filepath.name
                     result['status_descarga'] = 'Completado'
-                    result['error_detalle'] = '' # Limpiar errores previos si hubo reintentos
+                    result['error_detalle'] = 'OK' 
                     
-                    # Extraer fecha (fuera del hilo principal)
+                    # Extraer metadata (fuera del hilo principal)
                     loop = asyncio.get_event_loop()
-                    fecha = await loop.run_in_executor(executor, extract_emission_date, filepath)
-                    result['fecha_emision_pdf'] = fecha
+                    metadata = await loop.run_in_executor(executor, extract_pdf_metadata, filepath)
+                    
+                    result['tipo_informe'] = metadata['tipo_informe']
+                    result['codigo_ensayo'] = metadata['codigo_ensayo']
+                    result['fecha_informe'] = metadata['fecha_informe']
                     
                     break # ¡Éxito! Salir del bucle de reintentos
                 
@@ -380,13 +412,16 @@ async def download_single_pdf(
                     continue 
                 else:
                     # Errores fatales (404, 403 permanente) -> No reintentar
-                    result['error_detalle'] = f'HTTP {response.status}'
+                    result['error_detalle'] = f'HTTP {response.status} - NO ENCONTRADO/PROHIBIDO'
+                    result['tipo_informe'] = f'ERROR {response.status}'
                     break
 
         except asyncio.TimeoutError:
-            result['error_detalle'] = f'Timeout (Intento {attempt+1}/{MAX_RETRIES})'
+            result['error_detalle'] = f'Timeout - El servidor tardó demasiado'
+            result['tipo_informe'] = 'ERROR TIMEOUT'
         except Exception as e:
             result['error_detalle'] = f'{str(e)[:100]}'
+            result['tipo_informe'] = 'ERROR DESCONOCIDO'
     
     # BLOQUE CORREGIDO: Usar Lock para escribir en el CSV
     async with csv_lock:
@@ -399,7 +434,10 @@ async def download_single_pdf(
     return result
 
 async def download_all_pdfs(links: list[str], progress_callback):
-    """Descarga todos los PDFs con concurrencia limitada"""
+    """Descarga todos los PDFs con concurrencia limitada y POR LOTES"""
+    
+    BATCH_SIZE = 50 # Tamaño del lote
+    BATCH_DELAY = 2 # Segundos de descanso entre lotes
     
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_DOWNLOADS, ssl=False)
     
@@ -417,12 +455,26 @@ async def download_all_pdfs(links: list[str], progress_callback):
                     
                 return await download_single_pdf(session, url, index, progress_callback)
         
-        tasks = [
-            bounded_download(url, i + 1) 
-            for i, url in enumerate(links)
-        ]
-        
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Procesamiento por Lotes
+        total_links = len(links)
+        for i in range(0, total_links, BATCH_SIZE):
+            if not state.is_running: break
+            
+            chunk = links[i : i + BATCH_SIZE]
+            print(f"DEBUG: Iniciando Lote {i//BATCH_SIZE + 1}, procesando {len(chunk)} enlaces...")
+            
+            tasks = [
+                bounded_download(url, i + idx + 1) 
+                for idx, url in enumerate(chunk)
+            ]
+            
+            # Esperar a que termine este lote antes de seguir
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Pequeño descanso para no saturar
+            if (i + BATCH_SIZE) < total_links:
+                print(f"DEBUG: Pausa de {BATCH_DELAY}s entre lotes...")
+                await asyncio.sleep(BATCH_DELAY)
 
 # =============================================================================
 # INTERFAZ NICEGUI
@@ -691,11 +743,11 @@ async def main_page():
             ui.label('📋 Últimas Descargas').classes('text-xl text-white font-semibold mb-4')
             
             columns = [
-                {'name': 'url', 'label': 'URL Original', 'field': 'url', 'align': 'left'},
+                {'name': 'url', 'label': 'Link', 'field': 'url', 'align': 'left'},
                 {'name': 'status', 'label': 'Estado', 'field': 'status', 'align': 'center'},
-                {'name': 'redirects', 'label': 'Redirecciones', 'field': 'redirects', 'align': 'center'},
-                {'name': 'date', 'label': 'F. Emisión', 'field': 'date', 'align': 'center'},
-                {'name': 'error', 'label': 'Detalle', 'field': 'error', 'align': 'left'},
+                {'name': 'type', 'label': 'Tipo', 'field': 'type', 'align': 'left'},
+                {'name': 'code', 'label': 'Código', 'field': 'code', 'align': 'left'},
+                {'name': 'date', 'label': 'Fecha', 'field': 'date', 'align': 'center'},
             ]
             
             table = ui.table(
@@ -757,11 +809,11 @@ async def main_page():
             # Actualizar tabla (solo si hay cambios en la longitud o contenido básico)
             new_table_rows = [
                 {
-                    'url': r['url_inicial'][:60] + ('...' if len(r['url_inicial']) > 60 else ''),
-                    'status': '✅ Completado' if r['status_descarga'] == 'Completado' else '❌ Error',
-                    'redirects': f"{r['num_redirecciones']} saltos",
-                    'date': r['fecha_emision_pdf'][:20] if r['fecha_emision_pdf'] else '-',
-                    'error': r['error_detalle'][:40] if r['error_detalle'] else '-'
+                    'url': r['link_enviado'][:50] + '...',
+                    'status': '✅ OK' if r['status_descarga'] == 'Completado' else '❌ Error',
+                    'type': r['tipo_informe'][:30],
+                    'code': r['codigo_ensayo'][:20],
+                    'date': r['fecha_informe'][:12]
                 }
                 for r in state.recent_downloads[:15]
             ]
